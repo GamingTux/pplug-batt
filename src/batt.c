@@ -26,6 +26,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ============================================================================*/
 
 #include <locale.h>
+#include <string.h>
 #include <glib/gi18n.h>
 
 #include "plugin.h"
@@ -65,6 +66,7 @@ conf_table_t conf_table[2] = {
 static int init_measurement (PtBattPlugin *pt);
 static int charge_level (PtBattPlugin *pt, status_t *status, int *tim);
 static void draw_icon (PtBattPlugin *pt, int lev, float r, float g, float b, int powered);
+static void append_battery_details (battery *b, GString *tip);
 static void update_icon (PtBattPlugin *pt);
 static gboolean timer_event (PtBattPlugin *pt);
 
@@ -112,8 +114,12 @@ static int charge_level (PtBattPlugin *pt, status_t *status, int *tim)
         battery_update (b);
         if (battery_is_charging (b))
         {
-            if (strcasecmp (b->state, "full") == 0) *status = STAT_EXT_POWER;
-            else *status = STAT_CHARGING;
+            if (b->state && (strcasecmp (b->state, "full") == 0 || strcasecmp (b->state, "not charging") == 0))
+                *status = STAT_EXT_POWER;
+            else if (b->state && strcasecmp (b->state, "charging") == 0)
+                *status = STAT_CHARGING;
+            else
+                *status = STAT_EXT_POWER;
         }
         else *status = STAT_DISCHARGING;
         mins = b->seconds;
@@ -201,6 +207,124 @@ static void draw_icon (PtBattPlugin *pt, int lev, float r, float g, float b, int
 
     g_object_unref (pixbuf);
     cairo_destroy (cr);
+    cairo_surface_destroy (surface);
+}
+
+/* Append optional battery telemetry attributes if provided by the kernel driver */
+
+static void append_battery_details (battery *b, GString *tip)
+{
+    if (!b) return;
+
+    /* Power and current */
+    if (b->power_now > 0 && b->current_now > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Power : %0.2f W (%0.2f A)"),
+            b->power_now / 1000.0, b->current_now / 1000.0);
+    }
+    else if (b->power_now > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Power : %0.2f W"), b->power_now / 1000.0);
+    }
+    else if (b->current_now > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Current : %0.2f A"), b->current_now / 1000.0);
+    }
+
+    /* Voltage and design range */
+    if (b->voltage_now > 0)
+    {
+        g_string_append (tip, "\n");
+        if (b->voltage_min_design > 0 && b->voltage_max_design > 0)
+            g_string_append_printf (tip, _("Voltage : %0.2f V (%0.1f-%0.1f V)"),
+                b->voltage_now / 1000.0, b->voltage_min_design / 1000.0, b->voltage_max_design / 1000.0);
+        else
+            g_string_append_printf (tip, _("Voltage : %0.2f V"), b->voltage_now / 1000.0);
+    }
+
+    /* Energy (Wh) and/or Charge capacity (mAh) */
+    if (b->energy_now >= 0 && b->energy_full > 0 && b->charge_now >= 0 && b->charge_full > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Energy : %0.1f / %0.1f Wh (%d / %d mAh)"),
+            b->energy_now / 1000.0, b->energy_full / 1000.0, b->charge_now, b->charge_full);
+    }
+    else if (b->energy_now >= 0 && b->energy_full > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Energy : %0.1f / %0.1f Wh"),
+            b->energy_now / 1000.0, b->energy_full / 1000.0);
+    }
+    else if (b->charge_now >= 0 && b->charge_full > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Capacity : %d / %d mAh"), b->charge_now, b->charge_full);
+    }
+
+    /* Health & State of Health (%) */
+    if (b->health && b->health_pct > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Health : %s (%d%%)"), _(b->health), b->health_pct);
+    }
+    else if (b->health)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Health : %s"), _(b->health));
+    }
+    else if (b->health_pct > 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Health : %d%%"), b->health_pct);
+    }
+
+    /* Cycle count */
+    if (b->cycle_count >= 0)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Cycle count : %d"), b->cycle_count);
+    }
+
+    /* Charge control end threshold (if active < 100%) */
+    if (b->charge_threshold > 0 && b->charge_threshold < 100)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Charge limit : %d%%"), b->charge_threshold);
+    }
+
+    /* Temperature */
+    if (b->temp_deci_c != G_MININT)
+    {
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Temperature : %0.1f °C"), b->temp_deci_c / 10.0);
+    }
+
+    /* Manufacturer / Model / Technology */
+    if (b->manufacturer || b->model_name || b->technology)
+    {
+        GString *mdl = g_string_new (NULL);
+        if (b->manufacturer && b->model_name)
+            g_string_append_printf (mdl, "%s %s", b->manufacturer, b->model_name);
+        else if (b->manufacturer)
+            g_string_append (mdl, b->manufacturer);
+        else if (b->model_name)
+            g_string_append (mdl, b->model_name);
+
+        if (b->technology)
+        {
+            if (mdl->len > 0)
+                g_string_append_printf (mdl, " (%s)", b->technology);
+            else
+                g_string_append (mdl, b->technology);
+        }
+
+        g_string_append (tip, "\n");
+        g_string_append_printf (tip, _("Model : %s"), mdl->str);
+        g_string_free (mdl, TRUE);
+    }
 }
 
 /* Read the current charge state and update the icon accordingly */
@@ -210,7 +334,6 @@ static void update_icon (PtBattPlugin *pt)
     int capacity, time;
     status_t status;
     float ftime;
-    char str[255];
 
     if (!pt->timer)
     {
@@ -223,36 +346,41 @@ static void update_icon (PtBattPlugin *pt)
     if (status == STAT_UNKNOWN) return;
     ftime = time / 60.0;
 
+    GString *tip = g_string_new (NULL);
+
     // fill the battery symbol and create the tooltip
     if (status == STAT_CHARGING)
     {
         if (time <= 0)
-            sprintf (str, _("Charging : %d%%"), capacity);
+            g_string_append_printf (tip, _("Charging : %d%%"), capacity);
         else if (time < 90)
-            sprintf (str, _("Charging : %d%%\nTime remaining : %d minutes"), capacity, time);
+            g_string_append_printf (tip, _("Charging : %d%%\nTime remaining : %d minutes"), capacity, time);
         else
-            sprintf (str, _("Charging : %d%%\nTime remaining : %0.1f hours"), capacity, ftime);
+            g_string_append_printf (tip, _("Charging : %d%%\nTime remaining : %0.1f hours"), capacity, ftime);
         draw_icon (pt, capacity, 0.95, 0.64, 0, 1);
     }
     else if (status == STAT_EXT_POWER)
     {
-        sprintf (str, _("Charged : %d%%\nOn external power"), capacity);
+        g_string_append_printf (tip, _("Charged : %d%%\nOn external power"), capacity);
         draw_icon (pt, capacity, 0, 0.85, 0, 2);
     }
     else
     {
         if (time <= 0)
-            sprintf (str, _("Discharging : %d%%"), capacity);
+            g_string_append_printf (tip, _("Discharging : %d%%"), capacity);
         else if (time < 90)
-            sprintf (str, _("Discharging : %d%%\nTime remaining : %d minutes"), capacity, time);
+            g_string_append_printf (tip, _("Discharging : %d%%\nTime remaining : %d minutes"), capacity, time);
         else
-            sprintf (str, _("Discharging : %d%%\nTime remaining : %0.1f hours"), capacity, ftime);
+            g_string_append_printf (tip, _("Discharging : %d%%\nTime remaining : %0.1f hours"), capacity, ftime);
         if (capacity <= 20) draw_icon (pt, capacity, 1, 0, 0, 0);
         else draw_icon (pt, capacity, 0, 0.85, 0, 0);
     }
 
+    append_battery_details (pt->batt, tip);
+
     // set the tooltip
-    gtk_widget_set_tooltip_text (pt->tray_icon, str);
+    gtk_widget_set_tooltip_text (pt->tray_icon, tip->str);
+    g_string_free (tip, TRUE);
     gtk_widget_show_all (pt->plugin);
 }
 
@@ -321,6 +449,10 @@ void batt_destructor (gpointer user_data)
 
     /* Disconnect the timer */
     if (pt->timer) g_source_remove (pt->timer);
+
+    if (pt->batt) battery_free (pt->batt);
+    if (pt->plug) g_object_unref (pt->plug);
+    if (pt->flash) g_object_unref (pt->flash);
 
     g_free (pt);
 }

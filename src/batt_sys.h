@@ -38,29 +38,41 @@ typedef struct battery {
     int battery_num;
     /* path to battery dir */
     gchar *path;
-    /* sysfs file contents */
+    /* sysfs file contents (-1 = unavailable, temp_deci_c uses G_MININT) */
+    int capacity;
     int charge_now;
     int energy_now;
     int current_now;
     int power_now;
     int voltage_now;
+    int voltage_min_design;
+    int voltage_max_design;
     int charge_full_design;
     int energy_full_design;
     int charge_full;
     int energy_full;
+    int time_to_empty;
+    int time_to_full;
+    int cycle_count;
+    int temp_deci_c;
+    int charge_threshold;
     /* extra info */
     int seconds;
     int percentage;
+    int health_pct;
     char *state;
+    char *capacity_level;
+    char *health;
+    char *technology;
+    char *manufacturer;
+    char *model_name;
+    char *serial_number;
     char *scope;
-    //const char *poststr;
-    //const char *capacity_unit;
     int type_battery;
 } battery;
 
 battery *battery_get(int);
 battery *battery_update( battery *b );
-//void battery_print(battery *b, int show_capacity);
 gboolean battery_is_charging( battery *b );
 gint battery_get_remaining( battery *b );
 void battery_free(battery* bat);
